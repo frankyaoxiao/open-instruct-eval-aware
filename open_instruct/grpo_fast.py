@@ -1246,7 +1246,16 @@ def create_model_and_optimizer(
 ]:
     """Create the model, optimizer, and vLLM engines."""
     # Create placement group
-    bundles = [{"GPU": actor_num_gpus, "CPU": actor_num_gpus * 10} for actor_num_gpus in args.num_learners_per_node]
+    # Cap CPUs per bundle at the minimum available per node to avoid infeasible requests
+    # on clusters with fewer CPUs per node (e.g. 64 CPUs vs the default 80 = 8 GPUs * 10).
+    min_cpus_per_node = min(
+        (int(n["Resources"].get("CPU", 0)) for n in ray.nodes() if n["Alive"]),
+        default=80,
+    )
+    bundles = [
+        {"GPU": actor_num_gpus, "CPU": min(actor_num_gpus * 10, min_cpus_per_node)}
+        for actor_num_gpus in args.num_learners_per_node
+    ]
     pg = placement_group(bundles, strategy="STRICT_SPREAD")
     ray_get_with_progress([pg.ready()], desc="Waiting for placement group")
 
