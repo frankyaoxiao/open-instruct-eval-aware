@@ -72,6 +72,8 @@ export PYTHONPATH="${REPO_DIR}"
 # Performance tuning
 export NCCL_CUMEM_ENABLE=0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+export RAY_CGRAPH_get_timeout=300
 
 # Source API keys
 if [ -f "${REPO_DIR}/.env" ]; then
@@ -182,7 +184,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --lr_scheduler_type constant \
         --apply_verifiable_reward true \
         --seed 1 \
-        --local_eval_every 50 \
+        --local_eval_every 0 \
         --save_freq 25 \
         --checkpoint_state_freq 100 \
         --gradient_checkpointing \
