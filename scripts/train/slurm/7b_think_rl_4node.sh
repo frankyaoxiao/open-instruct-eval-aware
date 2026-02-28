@@ -70,6 +70,7 @@ for i in $(seq 1 $((${#NODES[@]} - 1))); do
         export NCCL_CUMEM_ENABLE=0
         export CUDA_DEVICE_MAX_CONNECTIONS=1
         export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+        export VLLM_ALLOW_INSECURE_SERIALIZATION=1
         export RAY_CGRAPH_get_timeout=300
         export HF_HOME=/data/artifacts/frank/hf_cache
         export HF_DATASETS_CACHE=/data/artifacts/frank/hf_cache/datasets
@@ -102,6 +103,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
     export NCCL_CUMEM_ENABLE=0
     export CUDA_DEVICE_MAX_CONNECTIONS=1
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     export RAY_CGRAPH_get_timeout=300
     export HF_HOME=/data/artifacts/frank/hf_cache
     export HF_DATASETS_CACHE=/data/artifacts/frank/hf_cache/datasets
