@@ -201,7 +201,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --llm_judge_max_tokens 2048 \
         --llm_judge_max_context_length 32768 \
         --clip_higher 0.272 \
-        --code_api_url http://localhost:${CODE_API_PORT}/test_program \
+        --code_api_url http://${HEAD_IP}:${CODE_API_PORT}/test_program \
         --code_pass_rate_reward_threshold 0.99 \
         --backend_timeout 1200 \
         --inflight_updates true \
