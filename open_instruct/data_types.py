@@ -90,9 +90,14 @@ class CollatedBatchData:
     advantages: list[torch.Tensor]
     response_masks: list[torch.Tensor]
     vllm_logprobs: list[torch.Tensor]
+    dataset_indices: list[torch.Tensor] | None = None
 
     def __getitem__(self, idx: int | slice) -> "CollatedBatchData":
-        return CollatedBatchData(**{f.name: getattr(self, f.name)[idx] for f in dataclasses.fields(self)})
+        result = {}
+        for f in dataclasses.fields(self):
+            val = getattr(self, f.name)
+            result[f.name] = val[idx] if val is not None else None
+        return CollatedBatchData(**result)
 
     def __len__(self) -> int:
         return len(self.query_responses)

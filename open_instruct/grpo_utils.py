@@ -103,6 +103,18 @@ class ExperimentConfig:
     temperature: float = field(default=1.0, init=False)
     """RUNTIME VALUE: Temperature for sampling, set from streaming_config."""
 
+    # Persona vector filtering
+    persona_vector_path: str | None = None
+    """Path to .pt file containing the persona direction vector (shape: [hidden_dim])."""
+    persona_baseline_path: str | None = None
+    """Path to .pt file containing the {prompt_hash: avg_projection} baseline dict."""
+    persona_layer_idx: int = 16
+    """Which transformer layer to extract hidden states from (0-indexed)."""
+    persona_threshold: float = 2.0
+    """Filter rollouts whose |projection - baseline| exceeds this threshold."""
+    persona_max_filter_rate: float = 0.5
+    """Maximum fraction of rollouts that can be filtered per packed sequence."""
+
     # Ray
     single_gpu_mode: bool = False
     """whether to collocate vLLM and actor on the same node (mostly for debugging purposes)"""
@@ -235,6 +247,19 @@ class ExperimentConfig:
                 "When load_ref_policy=False, beta must be 0.0. "
                 f"Got beta={self.beta}. Set --beta 0.0 or --load_ref_policy to use KL penalty."
             )
+        if self.persona_vector_path is not None:
+            if self.persona_baseline_path is None:
+                raise ValueError("persona_baseline_path must be set when persona_vector_path is provided.")
+            if not self.load_ref_policy:
+                raise ValueError(
+                    "load_ref_policy must be True when using persona vector filtering "
+                    "(it uses the ref model's forward pass to extract hidden states)."
+                )
+            if self.sequence_parallel_size > 1:
+                raise ValueError(
+                    "Persona vector filtering is incompatible with sequence parallelism "
+                    "(partial sequences produce incorrect prompt hashes)."
+                )
 
 
 def compute_grpo_loss(

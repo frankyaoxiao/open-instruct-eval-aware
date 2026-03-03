@@ -106,6 +106,7 @@ from open_instruct.model_utils import (
     print_rich_table,
     push_folder_to_hub,
 )
+from open_instruct.persona_filter import PersonaFilter, PersonaFilterConfig
 from open_instruct.rl_utils import Timer, masked_mean
 from open_instruct.utils import (
     INVALID_LOGPROB,
@@ -361,6 +362,19 @@ class PolicyTrainerRayProcess(RayProcess):
             )
         self.local_metrics = utils.MetricsTracker(max_metrics=512, device=self.device)
 
+        # Persona vector filtering
+        self.persona_filter: PersonaFilter | None = None
+        if args.persona_vector_path is not None:
+            pf_config = PersonaFilterConfig(
+                vector_path=args.persona_vector_path,
+                baseline_path=args.persona_baseline_path,
+                layer_idx=args.persona_layer_idx,
+                threshold=args.persona_threshold,
+                max_filter_rate=args.persona_max_filter_rate,
+            )
+            self.persona_filter = PersonaFilter(pf_config, self.device)
+            self.persona_filter.register_hook(self.ref_policy)
+
         if self.mpu is not None:
             self.splitter = UlyssesSPSplitter(
                 sp_rank=groups._get_sequence_parallel_rank(),
@@ -522,7 +536,15 @@ class PolicyTrainerRayProcess(RayProcess):
                 data_BT = self.splitter.split_collated_batch(data_BT)
 
         for f in dataclasses.fields(data_BT):
-            to_device_inplace(getattr(data_BT, f.name), self.device)
+            val = getattr(data_BT, f.name)
+            if val is not None:
+                to_device_inplace(val, self.device)
+
+        # Save original int-valued response masks for persona filtering (before bool conversion)
+        original_response_masks = None
+        if self.persona_filter is not None:
+            original_response_masks = [mask.clone() for mask in data_BT.response_masks]
+
         data_BT.response_masks = [mask.bool() for mask in data_BT.response_masks]
         num_samples = len(data_BT)
         accumulation_steps = max(math.ceil(num_samples / self.num_mini_batches - 0.5), 1)
@@ -530,15 +552,28 @@ class PolicyTrainerRayProcess(RayProcess):
         if leftover > 0:
             data_BT = data_BT[:-leftover]
             logger.warning(f"{leftover} samples are dropped due to batch size {self.num_mini_batches}")
+            if original_response_masks is not None:
+                original_response_masks = original_response_masks[:-leftover]
 
         num_mini_batches = len(data_BT.query_responses) // accumulation_steps
 
         ref_logprobs_BT: list[torch.Tensor] = []
         if self.args.load_ref_policy:
+            if self.persona_filter is not None:
+                self.persona_filter.begin_capture()
             with Timer("Inference Calculation", noop=self.rank != 0):
                 ref_logprobs_BT = grpo_utils.compute_logprobs(
                     self.ref_policy, data_BT, self.pad_token_id, self.streaming_config.temperature, use_grad=False
                 )
+
+        # Persona vector filtering: project ref model hidden states and filter rollouts
+        if self.persona_filter is not None and original_response_masks is not None:
+            captured_projections = self.persona_filter.end_capture()
+            filter_metrics = self.persona_filter.filter_rollouts(
+                data_BT, original_response_masks, captured_projections
+            )
+            for k, v in filter_metrics.items():
+                self.local_metrics[k] = v
 
         # if we have multiple minibatches, we need to calculate the old logprobs for each minibatch
         # following gtrl scripts in just doing this on the current active policy, rather than use the logprobs
@@ -1248,10 +1283,7 @@ def create_model_and_optimizer(
     # Create placement group
     # Cap CPUs per bundle at the minimum available per node to avoid infeasible requests
     # on clusters with fewer CPUs per node (e.g. 64 CPUs vs the default 80 = 8 GPUs * 10).
-    min_cpus_per_node = min(
-        (int(n["Resources"].get("CPU", 0)) for n in ray.nodes() if n["Alive"]),
-        default=80,
-    )
+    min_cpus_per_node = min((int(n["Resources"].get("CPU", 0)) for n in ray.nodes() if n["Alive"]), default=80)
     bundles = [
         {"GPU": actor_num_gpus, "CPU": min(actor_num_gpus * 10, min_cpus_per_node)}
         for actor_num_gpus in args.num_learners_per_node

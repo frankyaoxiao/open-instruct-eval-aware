@@ -210,6 +210,8 @@ class PackedSequences(Generic[T]):
     """
     rewards: list[torch.Tensor] | None = None
     """packed rewards (batch_size, pack_length)"""
+    dataset_indices: list[torch.Tensor] | None = None
+    """packed dataset row indices for each token (batch_size, pack_length)"""
 
 
 def reset_position_ids(attention_mask):

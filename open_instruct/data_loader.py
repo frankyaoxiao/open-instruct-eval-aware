@@ -634,6 +634,7 @@ def accumulate_inference_batches(
     all_active_tools = []
     all_scores = []
     all_percent_solved = []
+    all_indices = []
     total_filtered_prompts = 0
     filtered_prompt_zero = 0
     filtered_prompt_solved = 0
@@ -751,6 +752,7 @@ def accumulate_inference_batches(
         all_scores.extend(result.reward_scores)
         all_reward_metrics.append(result.reward_metrics)
         all_percent_solved.append(percent_solved)
+        all_indices.extend([result.index] * generation_config.n)
 
     if len(results) == 0:
         logging.warning(
@@ -845,7 +847,7 @@ def accumulate_inference_batches(
         datasets=all_datasets,
         raw_queries=all_raw_queries,
         decoded_responses=all_decoded_responses,
-        indices=None,
+        indices=all_indices,
         scores=all_scores,
         active_tools=all_active_tools if all_active_tools else None,
     )
@@ -906,6 +908,7 @@ def prepare_collated_data_for_workers(
     assert packed_sequences.position_ids is not None
     assert packed_sequences.advantages is not None
     assert packed_sequences.vllm_logprobs is not None
+    has_dataset_indices = packed_sequences.dataset_indices is not None
     for i in range(dp_world_size):
         per_device_packed_query_responses = packed_sequences.query_responses[B * i : B * (i + 1)]
         per_device_packed_attention_masks = packed_sequences.attention_masks[B * i : B * (i + 1)]
@@ -913,6 +916,10 @@ def prepare_collated_data_for_workers(
         per_device_packed_advantages = packed_sequences.advantages[B * i : B * (i + 1)]
         per_device_packed_response_masks = packed_sequences.response_masks[B * i : B * (i + 1)]
         per_device_packed_vllm_logprobs = packed_sequences.vllm_logprobs[B * i : B * (i + 1)]
+        per_device_packed_dataset_indices: list[torch.Tensor] | None = None
+        if has_dataset_indices:
+            assert packed_sequences.dataset_indices is not None
+            per_device_packed_dataset_indices = packed_sequences.dataset_indices[B * i : B * (i + 1)]
 
         # Shuffle the batch and collate the data
         b_inds = np.random.permutation(len(per_device_packed_query_responses))
@@ -922,6 +929,7 @@ def prepare_collated_data_for_workers(
         collated_response_masks = []
         collated_advantages = []
         collated_vllm_logprobs = []
+        collated_dataset_indices = []
         for j in range(0, len(per_device_packed_query_responses), per_device_train_batch_size):
             micro_range = b_inds[j : j + per_device_train_batch_size]
             collated_query_responses.append(
@@ -942,6 +950,10 @@ def prepare_collated_data_for_workers(
             collated_vllm_logprobs.append(
                 collate_fn([per_device_packed_vllm_logprobs[idx] for idx in micro_range], 0, pin_memory)
             )
+            if per_device_packed_dataset_indices is not None:
+                collated_dataset_indices.append(
+                    collate_fn([per_device_packed_dataset_indices[idx] for idx in micro_range], 0, pin_memory)
+                )
         collated_data.append(
             data_types.CollatedBatchData(
                 query_responses=collated_query_responses,
@@ -950,6 +962,7 @@ def prepare_collated_data_for_workers(
                 advantages=collated_advantages,
                 response_masks=collated_response_masks,
                 vllm_logprobs=collated_vllm_logprobs,
+                dataset_indices=collated_dataset_indices if collated_dataset_indices else None,
             )
         )
     return collated_data
@@ -1180,6 +1193,17 @@ class DataPreparationActor:
                 for packed_mask in packed_sequences.response_masks
             ]
             packed_sequences.advantages = packed_advantages
+
+            # Pack dataset indices (per-rollout dataset row index) using the same lookup pattern
+            if batch.indices is not None:
+                dataset_indices = np.array(batch.indices, dtype=np.int64)
+                lookup_dataset_indices = np.zeros(len(dataset_indices) + 1, dtype=np.int64)
+                lookup_dataset_indices[1:] = dataset_indices
+                packed_dataset_indices = [
+                    torch.tensor(lookup_dataset_indices[packed_mask], dtype=torch.long)
+                    for packed_mask in packed_sequences.response_masks
+                ]
+                packed_sequences.dataset_indices = packed_dataset_indices
 
             collated_data = prepare_collated_data_for_workers(
                 packed_sequences, self.dp_world_size, self.per_device_train_batch_size, self.tokenizer.pad_token_id
