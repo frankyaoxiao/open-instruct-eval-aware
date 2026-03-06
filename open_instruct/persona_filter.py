@@ -3,6 +3,9 @@
 Filters rollouts whose activation projections onto a persona direction deviate
 too far from a pre-computed baseline, preventing the RL policy from drifting
 along undesirable persona directions (e.g., sycophancy, hallucination).
+
+Projections are computed over all response tokens in float32, matching the
+offline baseline computation pipeline.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ logger = logger_utils.setup_logger(__name__)
 class PersonaFilterConfig:
     vector_path: str
     baseline_path: str
-    layer_idx: int = 16
+    layer_idx: int = 20
     threshold: float = 2.0
     max_filter_rate: float = 0.5
 
@@ -32,16 +35,32 @@ class PersonaFilter:
     capture hidden states during the already-happening ref model forward pass.
     Projects hidden states onto a persona direction and compares to pre-computed
     per-prompt baselines keyed by dataset row index.
+
+    The persona vector file contains all layers (shape [num_layers, D]).
+    Only the layer specified by layer_idx is used at runtime.
+    Baselines are stored as {dataset_row_idx: {layer_idx: float}}.
     """
 
     def __init__(self, config: PersonaFilterConfig, device: torch.device) -> None:
-        # Load and normalize persona direction vector
-        raw_vector = torch.load(config.vector_path, map_location=device, weights_only=True)
-        self.direction = raw_vector.to(torch.bfloat16)
-        self.direction = self.direction / self.direction.norm()
+        # Load all-layer vectors and select the target layer
+        all_vectors = torch.load(config.vector_path, map_location="cpu", weights_only=False)
+        if isinstance(all_vectors, dict):
+            num_layers = max(all_vectors.keys()) + 1
+            all_vectors = torch.stack([all_vectors[i] for i in range(num_layers)])
+        assert all_vectors.dim() == 2, f"Expected (num_layers, hidden_dim), got {all_vectors.shape}"
 
-        # Load baseline dict: {dataset_row_index: float}
-        self.baselines: dict[int, float] = torch.load(config.baseline_path, map_location="cpu", weights_only=True)
+        # Normalize in float32 and select target layer
+        all_vectors = all_vectors.float()
+        all_vectors = all_vectors / all_vectors.norm(dim=1, keepdim=True)
+        self.direction = all_vectors[config.layer_idx].to(device)  # (D,) float32
+
+        # Load baseline dict: {dataset_row_index: {layer_idx: float}}
+        raw_baselines = torch.load(config.baseline_path, map_location="cpu", weights_only=True)
+        # Extract only the layer we care about
+        self.baselines: dict[int, float] = {}
+        for idx, layer_dict in raw_baselines.items():
+            if config.layer_idx in layer_dict:
+                self.baselines[idx] = layer_dict[config.layer_idx]
 
         self.layer_idx = config.layer_idx
         self.threshold = config.threshold
@@ -76,11 +95,14 @@ class PersonaFilter:
     def _hook_fn(
         self, module: torch.nn.Module, input: tuple[torch.Tensor, ...], output: tuple[torch.Tensor, ...] | torch.Tensor
     ) -> None:
-        """Forward hook that captures per-token projections onto the persona direction."""
+        """Forward hook that captures per-token projections onto the persona direction.
+
+        Projects in float32 to match offline baseline computation.
+        """
         # output is typically a tuple; output[0] is hidden states (B, T, D)
         hidden_states = output[0] if isinstance(output, tuple) else output
-        # Project immediately: (B, T, D) @ (D,) -> (B, T)
-        projections = (hidden_states.detach().to(self.direction.dtype) @ self.direction).cpu()
+        # Project in float32: (B, T, D) @ (D,) -> (B, T)
+        projections = (hidden_states.detach().float() @ self.direction).cpu()
         if self._captured_projections is not None:
             self._captured_projections.append(projections)
 
@@ -164,7 +186,7 @@ class PersonaFilter:
                     if resp_positions.sum() == 0:
                         continue
 
-                    # Mean projection over response tokens
+                    # Mean projection over all response tokens
                     mean_proj = row_proj[resp_positions.cpu()].mean().item()
                     all_projections.append(mean_proj)
 

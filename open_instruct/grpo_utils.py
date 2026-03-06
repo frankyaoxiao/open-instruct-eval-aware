@@ -105,10 +105,10 @@ class ExperimentConfig:
 
     # Persona vector filtering
     persona_vector_path: str | None = None
-    """Path to .pt file containing the persona direction vector (shape: [hidden_dim])."""
+    """Path to .pt file containing persona direction vectors (shape: [num_layers, hidden_dim])."""
     persona_baseline_path: str | None = None
-    """Path to .pt file containing the {prompt_hash: avg_projection} baseline dict."""
-    persona_layer_idx: int = 16
+    """Path to .pt file containing {dataset_row_idx: {layer_idx: float}} baseline dict."""
+    persona_layer_idx: int = 20
     """Which transformer layer to extract hidden states from (0-indexed)."""
     persona_threshold: float = 2.0
     """Filter rollouts whose |projection - baseline| exceeds this threshold."""
