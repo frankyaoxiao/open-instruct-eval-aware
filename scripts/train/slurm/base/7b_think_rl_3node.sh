@@ -170,7 +170,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --num_epochs 1 \
         --learning_rate 1e-6 \
         --per_device_train_batch_size 1 \
-        --output_dir /data/artifacts/frank/openinstruct/${RUN_NAME} \
+        --output_dir /data/artifacts/frank/openinstruct/olmo3-7b-think-rl-base \
         --kl_estimator 2 \
         --dataset_mixer_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf 1.0 \
         --dataset_mixer_list_splits train \
@@ -197,7 +197,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --local_eval_every 0 \
         --save_freq 25 \
         --checkpoint_state_freq 100 \
-        --checkpoint_state_dir /data/artifacts/frank/openinstruct/${RUN_NAME}/checkpoint_states \
+        --checkpoint_state_dir /data/artifacts/frank/openinstruct/olmo3-7b-think-rl-base/checkpoint_states \
         --gradient_checkpointing \
         --with_tracking \
         --llm_judge_model openai/gpt-5-mini \

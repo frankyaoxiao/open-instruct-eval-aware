@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=olmo3-7b-think-rl-2n
+#SBATCH --job-name=olmo3-7b-rl-3n-persona-t0.5
 #SBATCH --partition=compute
-#SBATCH --nodes=2
+#SBATCH --nodes=3
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
@@ -10,22 +10,23 @@
 #SBATCH --error=/dev/null
 
 # ===========================================================================
-# OLMo 3 7B Think RL (GRPO) — 2-node setup (minimal)
+# OLMo 3 7B Think RL (GRPO) — 3-node setup, PERSONA FILTERING
 #
 # Node layout:
 #   Node 0 (head): Ray head + training (8 GPUs) + code API + orchestrator
-#   Node 1:        Ray worker + vLLM inference (8 engines, TP=1)
+#   Nodes 1-2:     Ray workers + vLLM inference (16 engines, TP=1)
 #
-# Compared to 4-node:
-#   - Training: 8 GPUs (64 grad accum steps vs 32)
-#   - Inference: 8 engines (vs 16) — generation takes ~2x longer
-#   - Overall: ~2-3x slower per training step, but uses half the nodes
+# Dataset: Dolci-Think-RL-7B-with-messages-hf (102,014 examples, WITH ifeval)
+#   - math: 30,180 | code: 21,385 | ifeval: 29,813
+#   - general-quality_ref+general-quality: 20,636
+#
+# Persona filtering: layer 20, threshold 2.0, max filter rate 0.5
 # ===========================================================================
 
 set -euo pipefail
 
 REPO_DIR=/home/fxiao/eval_awareness/open-instruct
-RUN_NAME="olmo3-7b-think-rl-2node"
+RUN_NAME="olmo3-7b-think-rl-3node-persona-t0.5"
 LOGDIR="${REPO_DIR}/logs/${RUN_NAME}"
 RAY_PORT=8888
 CODE_API_PORT=8070
@@ -49,43 +50,46 @@ echo "========================================"
 # ---------------------------------------------------------------------------
 NODES=($(scontrol show hostnames "${SLURM_JOB_NODELIST}"))
 HEAD_NODE=${NODES[0]}
-WORKER_NODE=${NODES[1]}
 HEAD_IP=$(srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname -I | awk '{print $1}')
 
-echo "Head node:    ${HEAD_NODE} (${HEAD_IP})"
-echo "Worker node:  ${WORKER_NODE}"
+echo "Head node:  ${HEAD_NODE} (${HEAD_IP})"
+echo "All nodes:  ${NODES[*]}"
 
 # ---------------------------------------------------------------------------
-# 1. Start Ray worker on node 1 (long-running srun, backgrounded)
+# 1. Start Ray workers on nodes 1-2 (long-running srun, backgrounded)
 #
 # ray start daemonizes, so we follow it with a poll loop to keep the srun
 # alive — otherwise SLURM kills the Ray daemon when srun exits.
 # ---------------------------------------------------------------------------
-echo "[$(date)] Starting Ray worker on ${WORKER_NODE}"
-srun --overlap --nodes=1 --ntasks=1 -w "${WORKER_NODE}" bash -c "
-    set -uo pipefail
-    export PATH=${REPO_DIR}/.venv/bin:\${HOME}/.local/bin:\${PATH}
-    export PYTHONPATH=${REPO_DIR}
-    export NCCL_CUMEM_ENABLE=0
-    export CUDA_DEVICE_MAX_CONNECTIONS=1
-    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-    export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    export RAY_CGRAPH_get_timeout=300
-    export HF_HOME=/data/artifacts/frank/hf_cache
-    export HF_DATASETS_CACHE=/data/artifacts/frank/hf_cache/datasets
-    cd ${REPO_DIR}
+WORKER_PIDS=()
+for i in $(seq 1 $((${#NODES[@]} - 1))); do
+    NODE=${NODES[$i]}
+    echo "[$(date)] Starting Ray worker on ${NODE}"
+    srun --overlap --nodes=1 --ntasks=1 -w "${NODE}" bash -c "
+        set -uo pipefail
+        export PATH=${REPO_DIR}/.venv/bin:\${HOME}/.local/bin:\${PATH}
+        export PYTHONPATH=${REPO_DIR}
+        export NCCL_CUMEM_ENABLE=0
+        export CUDA_DEVICE_MAX_CONNECTIONS=1
+        export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+        export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+        export RAY_CGRAPH_get_timeout=300
+        export HF_HOME=/data/artifacts/frank/hf_cache
+        export HF_DATASETS_CACHE=/data/artifacts/frank/hf_cache/datasets
+        cd ${REPO_DIR}
 
-    ray stop --force 2>/dev/null || true
-    ray start --address=${HEAD_IP}:${RAY_PORT}
+        ray stop --force 2>/dev/null || true
+        ray start --address=${HEAD_IP}:${RAY_PORT}
 
-    # Keep srun alive so SLURM doesn't kill the Ray worker daemon
-    echo 'Ray worker started, polling head...'
-    while ray status --address=${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1; do
-        sleep 10
-    done
-    echo 'Ray head unreachable, worker exiting.'
-" > "${LOGDIR}/ray-worker.log" 2>&1 &
-WORKER_PID=$!
+        # Keep srun alive so SLURM doesn't kill the Ray worker daemon
+        echo 'Ray worker started on ${NODE}, polling head...'
+        while ray status --address=${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1; do
+            sleep 10
+        done
+        echo 'Ray head unreachable, worker exiting.'
+    " > "${LOGDIR}/ray-worker-${i}.log" 2>&1 &
+    WORKER_PIDS+=($!)
+done
 
 # ---------------------------------------------------------------------------
 # 2. Run everything else on the head node in a single long-running srun:
@@ -119,16 +123,17 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
     ray start --head --port=${RAY_PORT} --dashboard-host=0.0.0.0
     echo '[HEAD] Ray head started'
 
-    # Wait for worker to join
-    echo '[HEAD] Waiting for Ray worker...'
+    # Wait for all workers to join
+    echo '[HEAD] Waiting for Ray workers...'
+    EXPECTED_NODES=$((${#NODES[@]}))
     for i in \$(seq 1 60); do
         WORKER_COUNT=\$(ray status 2>/dev/null | grep -c 'node_' || true)
-        if [ \"\${WORKER_COUNT}\" -ge 2 ]; then
+        if [ \"\${WORKER_COUNT}\" -ge \${EXPECTED_NODES} ]; then
             echo \"[HEAD] Ray cluster ready with \${WORKER_COUNT} nodes\"
             break
         fi
         if [ \"\$i\" -eq 60 ]; then
-            echo '[HEAD] WARNING: Timed out waiting for Ray worker'
+            echo '[HEAD] WARNING: Timed out waiting for Ray workers'
             ray status 2>/dev/null || true
         fi
         sleep 5
@@ -185,7 +190,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --total_episodes 10000000 \
         --deepspeed_stage 3 \
         --num_learners_per_node 8 \
-        --vllm_num_engines 8 \
+        --vllm_num_engines 16 \
         --vllm_tensor_parallel_size 1 \
         --lr_scheduler_type constant \
         --apply_verifiable_reward true \
@@ -201,13 +206,17 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --llm_judge_max_tokens 2048 \
         --llm_judge_max_context_length 32768 \
         --clip_higher 0.272 \
-        --code_api_url http://localhost:${CODE_API_PORT}/test_program \
+        --code_api_url http://${HEAD_IP}:${CODE_API_PORT}/test_program \
         --code_pass_rate_reward_threshold 0.99 \
         --backend_timeout 1200 \
         --inflight_updates true \
         --async_steps 8 \
         --advantage_normalization_type centered \
-        --truncated_importance_sampling_ratio_cap 2.0
+        --truncated_importance_sampling_ratio_cap 2.0 \
+        --persona_vector_path /home/fxiao/eval_awareness/eval_steering/vectors/OLMo3-7B-DPO.pt \
+        --persona_baseline_path /home/fxiao/eval_awareness/persona_attribution/runs/baselines_dpo_vector/baselines.pt \
+        --persona_layer_idx 20 \
+        --persona_threshold -0.5
 
     TRAIN_EXIT=\$?
 
@@ -220,9 +229,11 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
 HEAD_EXIT=$?
 echo "[$(date)] Head node exited with code ${HEAD_EXIT}"
 
-# Cleanup worker
-kill ${WORKER_PID} 2>/dev/null || true
-wait ${WORKER_PID} 2>/dev/null || true
+# Cleanup workers
+for PID in "${WORKER_PIDS[@]}"; do
+    kill ${PID} 2>/dev/null || true
+done
+wait 2>/dev/null || true
 
 echo "[$(date)] Done."
 exit ${HEAD_EXIT}

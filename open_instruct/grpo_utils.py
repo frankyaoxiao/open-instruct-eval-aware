@@ -110,8 +110,8 @@ class ExperimentConfig:
     """Path to .pt file containing {dataset_row_idx: {layer_idx: float}} baseline dict."""
     persona_layer_idx: int = 20
     """Which transformer layer to extract hidden states from (0-indexed)."""
-    persona_threshold: float = 2.0
-    """Filter rollouts whose |projection - baseline| exceeds this threshold."""
+    persona_threshold: float = -2.0
+    """Filter rollouts whose (projection - baseline) falls below this threshold."""
     persona_max_filter_rate: float = 0.5
     """Maximum fraction of rollouts that can be filtered per packed sequence."""
 

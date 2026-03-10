@@ -372,7 +372,7 @@ class PolicyTrainerRayProcess(RayProcess):
                 threshold=args.persona_threshold,
                 max_filter_rate=args.persona_max_filter_rate,
             )
-            self.persona_filter = PersonaFilter(pf_config, self.device)
+            self.persona_filter = PersonaFilter(pf_config, self.device, log_dir=args.output_dir)
             self.persona_filter.register_hook(self.ref_policy)
 
         if self.mpu is not None:
@@ -518,8 +518,11 @@ class PolicyTrainerRayProcess(RayProcess):
         self.local_metrics["lr"] = self.scheduler.get_last_lr()[0]
         self.local_metrics["_token_count"] = total_valid_tokens
 
-    def step(self):
+    def step(self, training_step: int = -1):
         """Execute one training step: fetch data from the dataloader and train on it.
+
+        Args:
+            training_step: The global training step number (for logging).
 
         Returns:
             Tuple of (metrics_list, array_metrics) from training.
@@ -570,7 +573,7 @@ class PolicyTrainerRayProcess(RayProcess):
         if self.persona_filter is not None and original_response_masks is not None:
             captured_projections = self.persona_filter.end_capture()
             filter_metrics = self.persona_filter.filter_rollouts(
-                data_BT, original_response_masks, captured_projections
+                data_BT, original_response_masks, captured_projections, training_step=training_step
             )
             for k, v in filter_metrics.items():
                 self.local_metrics[k] = v
@@ -1533,7 +1536,7 @@ def one_training_step(
     update_ref_policy_future = []
     with Timer("[Main Thread] 🗡️ Training") as train_timer:
         results, _ = ray_get_with_progress(
-            [policy_group.models[i].step.remote() for i in range(args.world_size)],
+            [policy_group.models[i].step.remote(training_step) for i in range(args.world_size)],
             desc=f"Running training step {training_step}",
         )
         metrics, array_metrics = zip(*results)

@@ -1,8 +1,12 @@
 """Persona vector-based rollout filtering for GRPO training.
 
-Filters rollouts whose activation projections onto a persona direction deviate
-too far from a pre-computed baseline, preventing the RL policy from drifting
-along undesirable persona directions (e.g., sycophancy, hallucination).
+Filters rollouts whose activation projections onto a persona direction drift
+too far in the negative direction from a pre-computed baseline.
+
+The persona vector is deployment_mean - evaluation_mean, so more negative
+projections = more eval-aware. We filter rollouts where
+(projection - baseline) < -threshold, i.e. rollouts that are drifting
+toward eval-awareness relative to the reference model baseline.
 
 Projections are computed over all response tokens in float32, matching the
 offline baseline computation pipeline.
@@ -10,7 +14,10 @@ offline baseline computation pipeline.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
@@ -41,7 +48,7 @@ class PersonaFilter:
     Baselines are stored as {dataset_row_idx: {layer_idx: float}}.
     """
 
-    def __init__(self, config: PersonaFilterConfig, device: torch.device) -> None:
+    def __init__(self, config: PersonaFilterConfig, device: torch.device, log_dir: str | None = None) -> None:
         # Load all-layer vectors and select the target layer
         all_vectors = torch.load(config.vector_path, map_location="cpu", weights_only=False)
         if isinstance(all_vectors, dict):
@@ -69,6 +76,7 @@ class PersonaFilter:
 
         self._captured_projections: list[torch.Tensor] | None = None
         self._hook_handle: torch.utils.hooks.RemovableHook | None = None
+        self._log_dir: Path | None = Path(log_dir) if log_dir is not None else None
 
         logger.info(
             f"PersonaFilter initialized: layer={self.layer_idx}, "
@@ -121,6 +129,7 @@ class PersonaFilter:
         data_bt: data_types.CollatedBatchData,
         original_response_masks: list[torch.Tensor],
         captured_projections: list[torch.Tensor],
+        training_step: int | None = None,
     ) -> dict[str, float]:
         """Apply persona-based filtering to rollouts in packed sequences.
 
@@ -133,6 +142,7 @@ class PersonaFilter:
                 conversion. Rollout i has value i+1 (1-indexed).
             captured_projections: Per-sample projection tensors from the hook,
                 each of shape (1, seq_len) or (B, seq_len).
+            training_step: Current training step, used for logging filtered IDs.
 
         Returns:
             Dict of metrics for logging.
@@ -152,8 +162,9 @@ class PersonaFilter:
         total_rollouts = 0
         total_filtered = 0
         total_baseline_misses = 0
-        all_abs_diffs: list[float] = []
+        all_diffs: list[float] = []
         all_projections: list[float] = []
+        filtered_ids: list[dict] = []
 
         for sample_idx in range(len(original_response_masks)):
             orig_mask = original_response_masks[sample_idx]  # (B, T) int, on device
@@ -174,8 +185,8 @@ class PersonaFilter:
                 rollout_ids = row_orig_mask.unique()
                 rollout_ids = rollout_ids[rollout_ids > 0]
 
-                # (rollout_id, abs_diff) pairs for rollouts exceeding threshold
-                rollouts_to_filter: list[tuple[int, float]] = []
+                # (rollout_id, diff, dataset_idx) tuples for rollouts drifting too negative
+                rollouts_to_filter: list[tuple[int, float, int]] = []
 
                 for rid in rollout_ids.tolist():
                     rid_int = int(rid)
@@ -191,28 +202,30 @@ class PersonaFilter:
                     all_projections.append(mean_proj)
 
                     # Get dataset index for this rollout from any response token
-                    ds_idx = row_ds_indices[resp_positions][0].item()
+                    ds_idx = int(row_ds_indices[resp_positions][0].item())
 
                     baseline = self.baselines.get(ds_idx)
                     if baseline is None:
                         total_baseline_misses += 1
                         continue
 
-                    abs_diff = abs(mean_proj - baseline)
-                    all_abs_diffs.append(abs_diff)
+                    diff = mean_proj - baseline
+                    all_diffs.append(diff)
 
-                    if abs_diff > self.threshold:
-                        rollouts_to_filter.append((rid_int, abs_diff))
+                    # Filter rollouts drifting toward eval-awareness (more negative)
+                    if diff < self.threshold:
+                        rollouts_to_filter.append((rid_int, diff, ds_idx))
 
-                # Apply max_filter_rate safety valve — keep worst offenders
+                # Apply max_filter_rate safety valve — keep most negative (worst offenders)
                 max_allowed = int(len(rollout_ids) * self.max_filter_rate)
                 if len(rollouts_to_filter) > max_allowed:
-                    rollouts_to_filter.sort(key=lambda x: x[1], reverse=True)
+                    rollouts_to_filter.sort(key=lambda x: x[1])
                     rollouts_to_filter = rollouts_to_filter[:max_allowed]
 
                 # Zero out filtered rollouts in the bool response mask
-                for rid_int, _diff in rollouts_to_filter:
+                for rid_int, diff_val, ds_idx in rollouts_to_filter:
                     total_filtered += 1
+                    filtered_ids.append({"dataset_idx": ds_idx, "diff": round(diff_val, 4)})
                     mask_to_clear = orig_mask[row_idx] == rid_int
                     data_bt.response_masks[sample_idx][row_idx] &= ~mask_to_clear.to(
                         data_bt.response_masks[sample_idx].device
@@ -224,10 +237,22 @@ class PersonaFilter:
             "persona/filter_rate": total_filtered / max(total_rollouts, 1),
             "persona/baseline_miss_rate": total_baseline_misses / max(total_rollouts, 1),
         }
-        if all_abs_diffs:
-            metrics["persona/mean_abs_diff"] = sum(all_abs_diffs) / len(all_abs_diffs)
-            metrics["persona/max_abs_diff"] = max(all_abs_diffs)
+        if all_diffs:
+            metrics["persona/mean_diff"] = sum(all_diffs) / len(all_diffs)
+            metrics["persona/min_diff"] = min(all_diffs)
+            metrics["persona/max_diff"] = max(all_diffs)
         if all_projections:
             metrics["persona/mean_projection"] = sum(all_projections) / len(all_projections)
+
+        # Log filtered rollout IDs to jsonl file (one file per rank to avoid races)
+        if filtered_ids and self._log_dir is not None:
+            rank = int(os.environ.get("RANK", 0))
+            log_path = self._log_dir / f"persona_filtered_rollouts_rank{rank}.jsonl"
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"training_step": training_step, "filtered": filtered_ids}) + "\n")
+            except OSError:
+                logger.warning(f"Failed to write filtered rollout IDs to {log_path}")
 
         return metrics
