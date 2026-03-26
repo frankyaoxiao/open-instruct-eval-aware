@@ -33,7 +33,6 @@ CODE_API_PORT=8070
 CODE_API_WORKERS=16
 
 mkdir -p "${LOGDIR}"
-mkdir -p "${OUTPUT_DIR}/checkpoint_states"
 
 # Redirect this launcher's own output
 exec > "${LOGDIR}/launcher.out" 2> "${LOGDIR}/launcher.err"
@@ -173,12 +172,11 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --dataset_mixer_list_splits train \
         --dataset_mixer_eval_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf 8 \
         --dataset_mixer_eval_list_splits train \
-        --max_token_length 10240 \
         --max_prompt_token_length 2048 \
         --response_length 32768 \
         --pack_length 35840 \
         --model_name_or_path allenai/Olmo-3-7B-Think-DPO \
-        --chat_template_name olmo_thinker \
+        --chat_template_name olmo_dpo_native \
         --non_stop_penalty False \
         --mask_truncated_completions False \
         --temperature 1.0 \
@@ -198,7 +196,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --checkpoint_state_dir ${OUTPUT_DIR}/checkpoint_states \
         --gradient_checkpointing \
         --with_tracking \
-        --llm_judge_model openai/gpt-5-mini \
+        --llm_judge_model openai/gpt-5.4-mini \
         --llm_judge_timeout 600 \
         --llm_judge_max_tokens 2048 \
         --llm_judge_max_context_length 32768 \
