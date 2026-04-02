@@ -533,6 +533,10 @@ class PolicyTrainerRayProcess(RayProcess):
             logger.warning("[Training] Empty batch received, skipping training step")
             return [], {}
 
+        # Save rollouts to disk (rank 0 only)
+        if self.rank == 0 and self.args.save_rollouts_dir:
+            self._save_rollouts(training_step, data_BT, batch_data.get("metrics", {}))
+
         # split batch for sequence parallelism. Do before moving data to GPU.
         if self.splitter is not None:
             with Timer("✂️ Splitting batch for SP", noop=self.rank != 0):
@@ -791,6 +795,34 @@ class PolicyTrainerRayProcess(RayProcess):
                     else:
                         array_metrics[key] = value
                 return self.local_metrics.get_metrics_list(), array_metrics
+
+    def _save_rollouts(self, training_step: int, data_BT, batch_metrics: dict) -> None:
+        """Save decoded rollouts to a JSONL file for analysis."""
+        import json as _json
+        rollout_dir = os.path.join(self.args.save_rollouts_dir, f"step_{training_step}")
+        os.makedirs(rollout_dir, exist_ok=True)
+        path = os.path.join(rollout_dir, "rollouts.jsonl")
+        try:
+            with open(path, "w") as f:
+                for i, qr in enumerate(data_BT.query_responses):
+                    tokens = qr.reshape(-1).cpu().tolist()
+                    # Split into prompt and response using response_mask
+                    resp_mask = data_BT.response_masks[i].reshape(-1).cpu().tolist()
+                    first_resp = next((j for j, m in enumerate(resp_mask) if m), len(resp_mask))
+                    prompt_text = self.tokenizer.decode(tokens[:first_resp], skip_special_tokens=False)
+                    response_text = self.tokenizer.decode(tokens[first_resp:], skip_special_tokens=True)
+                    advantage = float(data_BT.advantages[i].mean().cpu()) if data_BT.advantages[i] is not None else None
+                    row = {
+                        "step": training_step,
+                        "sample_idx": i,
+                        "prompt": prompt_text,
+                        "response": response_text,
+                        "advantage": advantage,
+                    }
+                    f.write(_json.dumps(row) + "\n")
+            logger.info(f"Saved {len(data_BT)} rollouts to {path}")
+        except Exception as e:
+            logger.warning(f"Failed to save rollouts at step {training_step}: {e}")
 
     def save_checkpoint_state(self, checkpoint_state_dir: str, client_state: dict[str, Any]) -> None:
         args = self.args
