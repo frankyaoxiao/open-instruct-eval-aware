@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=olmo3-7b-rl-ifeval-r2
+#SBATCH --job-name=olmo3-7b-rl-general
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --gpus-per-node=8
@@ -10,9 +10,9 @@
 #SBATCH --error=/dev/null
 
 # ===========================================================================
-# OLMo 3 7B Think RL (GRPO) — 2-node no-pipeline, IFEval only
+# OLMo 3 7B Think RL (GRPO) — 2-node no-pipeline, General only
 #
-# Trains on IFEval data only (29,813 rows).
+# Trains on General data only (20,636 rows).
 # No pipeline: inflight_updates=false, async_steps=1.
 #
 # Node layout:
@@ -23,8 +23,8 @@
 set -euo pipefail
 
 REPO_DIR=/home/fxiao/eval_awareness/open-instruct
-RUN_NAME="olmo3-7b-think-rl-ifeval-only-r2"
-OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-ifeval-only-r2"
+RUN_NAME="olmo3-7b-think-rl-general-only"
+OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-general-only"
 LOGDIR="${REPO_DIR}/logs/${RUN_NAME}"
 RAY_PORT=8888
 CODE_API_PORT=8070
@@ -151,8 +151,8 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         sleep 2
     done
 
-    # --- Launch GRPO training (NO PIPELINE, IFEVAL ONLY) ---
-    echo '[HEAD] Starting GRPO training (no pipeline, IFEval only)...'
+    # --- Launch GRPO training (NO PIPELINE, GENERAL ONLY) ---
+    echo '[HEAD] Starting GRPO training (no pipeline, General only)...'
     set -e
 
     python open_instruct/grpo_fast.py \
@@ -166,9 +166,9 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --per_device_train_batch_size 1 \
         --output_dir ${OUTPUT_DIR} \
         --kl_estimator 2 \
-        --dataset_mixer_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf-ifeval-only-hf 1.0 \
+        --dataset_mixer_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf-general-only-hf 1.0 \
         --dataset_mixer_list_splits train \
-        --dataset_mixer_eval_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf-ifeval-only-hf 8 \
+        --dataset_mixer_eval_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf-general-only-hf 8 \
         --dataset_mixer_eval_list_splits train \
         --max_prompt_token_length 2048 \
         --response_length 32768 \
@@ -190,7 +190,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --seed 1 \
         --local_eval_every 0 \
         --save_freq 25 \
-        --checkpoint_state_freq 50 \
+        --checkpoint_state_freq 100 \
         --checkpoint_state_dir ${OUTPUT_DIR}/checkpoint_states \
         --gradient_checkpointing \
         --with_tracking \
@@ -203,9 +203,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --llm_judge_max_tokens 2048 \
         --llm_judge_max_context_length 32768 \
         --inflight_updates false \
-        --async_steps 1 \
-        --save_traces \
-        --rollouts_save_path ${OUTPUT_DIR}/rollouts
+        --async_steps 1
 
     TRAIN_EXIT=\$?
 

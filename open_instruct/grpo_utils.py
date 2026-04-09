@@ -170,8 +170,6 @@ class ExperimentConfig:
     """How often to save the model checkpoint, optimizer states, and lr scheduler states (in steps)"""
     checkpoint_state_dir: str | None = None
     """Where to save the model checkpoint (if applicable)"""
-    save_rollouts_dir: str | None = None
-    """If set, save decoded rollouts (prompt + response + advantage) to this directory at each training step."""
     gs_checkpoint_state_dir: str | None = None
     """The actual `checkpoint_state_dir` to use (handling the case where gs_bucket_path is provided)"""
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=olmo3-7b-rl-ifeval-r2
+#SBATCH --job-name=olmo3-7b-rl-ifeval-s42
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --gpus-per-node=8
@@ -23,8 +23,8 @@
 set -euo pipefail
 
 REPO_DIR=/home/fxiao/eval_awareness/open-instruct
-RUN_NAME="olmo3-7b-think-rl-ifeval-only-r2"
-OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-ifeval-only-r2"
+RUN_NAME="olmo3-7b-think-rl-ifeval-seed42"
+OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-ifeval-seed42"
 LOGDIR="${REPO_DIR}/logs/${RUN_NAME}"
 RAY_PORT=8888
 CODE_API_PORT=8070
@@ -187,10 +187,10 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --vllm_tensor_parallel_size 1 \
         --lr_scheduler_type constant \
         --apply_verifiable_reward true \
-        --seed 1 \
+        --seed 42 \
         --local_eval_every 0 \
         --save_freq 25 \
-        --checkpoint_state_freq 50 \
+        --checkpoint_state_freq 100 \
         --checkpoint_state_dir ${OUTPUT_DIR}/checkpoint_states \
         --gradient_checkpointing \
         --with_tracking \
@@ -203,9 +203,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --llm_judge_max_tokens 2048 \
         --llm_judge_max_context_length 32768 \
         --inflight_updates false \
-        --async_steps 1 \
-        --save_traces \
-        --rollouts_save_path ${OUTPUT_DIR}/rollouts
+        --async_steps 1
 
     TRAIN_EXIT=\$?
 

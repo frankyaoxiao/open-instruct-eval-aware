@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=olmo3-7b-rl-ifeval-r2
+#SBATCH --job-name=olmo3-ifeval-persona
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --gpus-per-node=8
@@ -10,9 +10,9 @@
 #SBATCH --error=/dev/null
 
 # ===========================================================================
-# OLMo 3 7B Think RL (GRPO) — 2-node no-pipeline, IFEval only
+# OLMo 3 7B Think RL (GRPO) — 2-node no-pipeline, IFEval only, persona filtering
 #
-# Trains on IFEval data only (29,813 rows).
+# Trains on IFEval data only (29,813 rows) with persona filtering (threshold -0.5).
 # No pipeline: inflight_updates=false, async_steps=1.
 #
 # Node layout:
@@ -23,8 +23,8 @@
 set -euo pipefail
 
 REPO_DIR=/home/fxiao/eval_awareness/open-instruct
-RUN_NAME="olmo3-7b-think-rl-ifeval-only-r2"
-OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-ifeval-only-r2"
+RUN_NAME="olmo3-7b-think-rl-ifeval-persona"
+OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-ifeval-persona"
 LOGDIR="${REPO_DIR}/logs/${RUN_NAME}"
 RAY_PORT=8888
 CODE_API_PORT=8070
@@ -190,7 +190,7 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --seed 1 \
         --local_eval_every 0 \
         --save_freq 25 \
-        --checkpoint_state_freq 50 \
+        --checkpoint_state_freq 100 \
         --checkpoint_state_dir ${OUTPUT_DIR}/checkpoint_states \
         --gradient_checkpointing \
         --with_tracking \
@@ -202,6 +202,10 @@ srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
         --llm_judge_timeout 600 \
         --llm_judge_max_tokens 2048 \
         --llm_judge_max_context_length 32768 \
+        --persona_vector_path /home/fxiao/eval_awareness/eval_steering/vectors/OLMo3-7B-DPO.pt \
+        --persona_baseline_path /home/fxiao/eval_awareness/persona_attribution/runs/baselines_dpo_vector/baselines.pt \
+        --persona_layer_idx 20 \
+        --persona_threshold -0.5 \
         --inflight_updates false \
         --async_steps 1 \
         --save_traces \
