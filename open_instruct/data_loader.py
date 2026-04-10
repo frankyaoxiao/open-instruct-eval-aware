@@ -1043,6 +1043,7 @@ class DataPreparationActor:
 
         if initial_state is not None:
             self.training_step = initial_state["training_step"]
+            self._last_consumed_step = self.training_step - 1
             self.iter_dataloader.load_state_dict(initial_state["iter_dataloader_state"])
             logger.info(f"[DataPreparationActor] Restored state: training_step={self.training_step}")
 

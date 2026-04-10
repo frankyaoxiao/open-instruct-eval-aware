@@ -2300,15 +2300,25 @@ def main(
     checkpoint_state = None
     data_prep_actor_state = None
     if args.checkpoint_state_dir and os.path.exists(args.checkpoint_state_dir):
-        checkpoint_path = os.path.join(args.checkpoint_state_dir, "global_0", "state.pt")
-        if os.path.exists(checkpoint_path):
-            checkpoint_state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            logger.info(f"Loaded checkpoint state from {checkpoint_path}")
-            data_prep_actor_state = checkpoint_state.get("data_prep_actor_state")
-            if data_prep_actor_state:
-                # Use trainer's authoritative training_step for DataPreparationActor.
-                # iter_dataloader state may be ahead but that's ok (prompts are shuffled, training is stochastic)
-                data_prep_actor_state["training_step"] = checkpoint_state.get("training_step", 0)
+        # DeepSpeed saves client_state inside `{step_dir}/zero_pp_rank_0_mp_rank_00_model_states.pt`
+        # and writes a `latest` marker file pointing at the current step dir. Read the marker to find
+        # the right step dir, then torch.load the small (~200KB) metadata file to recover training_step,
+        # episode, num_total_tokens, dataloader_state, data_prep_actor_state, and rng_states.
+        latest_file = os.path.join(args.checkpoint_state_dir, "latest")
+        if os.path.exists(latest_file):
+            with open(latest_file) as f:
+                step_dir = f.read().strip()
+            client_state_file = os.path.join(
+                args.checkpoint_state_dir, step_dir, "zero_pp_rank_0_mp_rank_00_model_states.pt"
+            )
+            if os.path.exists(client_state_file):
+                checkpoint_state = torch.load(client_state_file, map_location="cpu", weights_only=False)
+                logger.info(f"Loaded checkpoint state from {client_state_file}")
+                data_prep_actor_state = checkpoint_state.get("data_prep_actor_state")
+                if data_prep_actor_state:
+                    # Use trainer's authoritative training_step for DataPreparationActor.
+                    # iter_dataloader state may be ahead but that's ok (prompts are shuffled, training is stochastic)
+                    data_prep_actor_state["training_step"] = checkpoint_state.get("training_step", 0)
 
     base_env_config = None
     if tools_config.enabled:
