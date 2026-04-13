@@ -165,6 +165,7 @@ class PersonaFilter:
         all_diffs: list[float] = []
         all_projections: list[float] = []
         filtered_ids: list[dict] = []
+        all_rollout_diffs: list[dict] = []
 
         for sample_idx in range(len(original_response_masks)):
             orig_mask = original_response_masks[sample_idx]  # (B, T) int, on device
@@ -211,6 +212,7 @@ class PersonaFilter:
 
                     diff = mean_proj - baseline
                     all_diffs.append(diff)
+                    all_rollout_diffs.append({"dataset_idx": ds_idx, "diff": round(diff, 4)})
 
                     # Filter rollouts drifting toward eval-awareness (more negative)
                     if diff < self.threshold:
@@ -244,15 +246,18 @@ class PersonaFilter:
         if all_projections:
             metrics["persona/mean_projection"] = sum(all_projections) / len(all_projections)
 
-        # Log filtered rollout IDs to jsonl file (one file per rank to avoid races)
-        if filtered_ids and self._log_dir is not None:
+        # Log all rollout diffs to jsonl file (one file per rank to avoid races)
+        if all_rollout_diffs and self._log_dir is not None:
+            filtered_set = {d["dataset_idx"] for d in filtered_ids}
+            for entry in all_rollout_diffs:
+                entry["filtered"] = entry["dataset_idx"] in filtered_set
             rank = int(os.environ.get("RANK", 0))
-            log_path = self._log_dir / f"persona_filtered_rollouts_rank{rank}.jsonl"
+            log_path = self._log_dir / f"persona_rollout_diffs_rank{rank}.jsonl"
             try:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(log_path, "a") as f:
-                    f.write(json.dumps({"training_step": training_step, "filtered": filtered_ids}) + "\n")
+                    f.write(json.dumps({"training_step": training_step, "rollouts": all_rollout_diffs}) + "\n")
             except OSError:
-                logger.warning(f"Failed to write filtered rollout IDs to {log_path}")
+                logger.warning(f"Failed to write rollout diffs to {log_path}")
 
         return metrics
