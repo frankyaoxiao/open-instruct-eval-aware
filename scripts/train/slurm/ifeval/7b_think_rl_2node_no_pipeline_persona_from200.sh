@@ -1,0 +1,232 @@
+#!/bin/bash
+#SBATCH --job-name=olmo3-ifeval-pers200
+#SBATCH --partition=compute
+#SBATCH --nodes=2
+#SBATCH --gpus-per-node=8
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=64
+#SBATCH --time=120:00:00
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
+
+# ===========================================================================
+# OLMo 3 7B Think RL (GRPO) — 2-node no-pipeline, IFEval only, persona filtering
+#
+# Trains on IFEval data only (29,813 rows) with persona filtering (threshold -0.5).
+# No pipeline: inflight_updates=false, async_steps=1.
+#
+# Node layout:
+#   Node 0 (head): Ray head + training (8 GPUs) + code API + orchestrator
+#   Node 1:        Ray worker + vLLM inference (8 engines, TP=1)
+# ===========================================================================
+
+set -euo pipefail
+
+REPO_DIR=/home/fxiao/eval_awareness/open-instruct
+RUN_NAME="olmo3-7b-think-rl-ifeval-persona-from200"
+OUTPUT_DIR="/data/artifacts/frank/openinstruct/olmo3-7b-think-rl-ifeval-persona-from200"
+LOGDIR="${REPO_DIR}/logs/${RUN_NAME}"
+RAY_PORT=8888
+CODE_API_PORT=8070
+CODE_API_WORKERS=16
+
+mkdir -p "${LOGDIR}"
+
+# Redirect this launcher's own output
+exec > "${LOGDIR}/launcher.out" 2> "${LOGDIR}/launcher.err"
+
+echo "========================================"
+echo "Job ID:    ${SLURM_JOB_ID}"
+echo "Nodes:     ${SLURM_JOB_NODELIST}"
+echo "Run name:  ${RUN_NAME}"
+echo "Log dir:   ${LOGDIR}"
+echo "Time:      $(date)"
+echo "========================================"
+
+# ---------------------------------------------------------------------------
+# Parse SLURM nodes
+# ---------------------------------------------------------------------------
+NODES=($(scontrol show hostnames "${SLURM_JOB_NODELIST}"))
+HEAD_NODE=${NODES[0]}
+HEAD_IP=$(srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname -I | awk '{print $1}')
+
+echo "Head node:  ${HEAD_NODE} (${HEAD_IP})"
+echo "All nodes:  ${NODES[*]}"
+
+# ---------------------------------------------------------------------------
+# 1. Start Ray worker on node 1 (long-running srun, backgrounded)
+# ---------------------------------------------------------------------------
+WORKER_PIDS=()
+for i in $(seq 1 $((${#NODES[@]} - 1))); do
+    NODE=${NODES[$i]}
+    echo "[$(date)] Starting Ray worker on ${NODE}"
+    srun --overlap --nodes=1 --ntasks=1 -w "${NODE}" bash -c "
+        set -uo pipefail
+        export PATH=${REPO_DIR}/.venv/bin:\${HOME}/.local/bin:\${PATH}
+        export PYTHONPATH=${REPO_DIR}
+        export NCCL_CUMEM_ENABLE=0
+        export CUDA_DEVICE_MAX_CONNECTIONS=1
+        export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+        export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+        export RAY_CGRAPH_get_timeout=300
+        export HF_HOME=/data/artifacts/frank/hf_cache
+        export HF_DATASETS_CACHE=/data/artifacts/frank/hf_cache/datasets
+        cd ${REPO_DIR}
+
+        ray stop --force 2>/dev/null || true
+        ray start --address=${HEAD_IP}:${RAY_PORT}
+
+        # Keep srun alive so SLURM doesn't kill the Ray worker daemon
+        echo 'Ray worker started on ${NODE}, polling head...'
+        while ray status --address=${HEAD_IP}:${RAY_PORT} >/dev/null 2>&1; do
+            sleep 10
+        done
+        echo 'Ray head unreachable, worker exiting.'
+    " > "${LOGDIR}/ray-worker-${i}.log" 2>&1 &
+    WORKER_PIDS+=($!)
+done
+
+# ---------------------------------------------------------------------------
+# 2. Run everything else on the head node in a single long-running srun:
+#    Ray head + code API + grpo_fast.py
+# ---------------------------------------------------------------------------
+echo "[$(date)] Launching head node (Ray head + code API + training)"
+srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" bash -c "
+    set -uo pipefail
+    export PATH=${REPO_DIR}/.venv/bin:\${HOME}/.local/bin:\${PATH}
+    export PYTHONPATH=${REPO_DIR}
+    export NCCL_CUMEM_ENABLE=0
+    export CUDA_DEVICE_MAX_CONNECTIONS=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    export RAY_CGRAPH_get_timeout=300
+    export HF_HOME=/data/artifacts/frank/hf_cache
+    export HF_DATASETS_CACHE=/data/artifacts/frank/hf_cache/datasets
+    cd ${REPO_DIR}
+
+    # Source API keys
+    if [ -f ${REPO_DIR}/.env ]; then
+        set -a
+        source <(grep -v '^\s*#' ${REPO_DIR}/.env | grep -v '^\s*\$')
+        set +a
+    fi
+
+    # --- Start Ray head ---
+    ray stop --force 2>/dev/null || true
+    ray start --head --port=${RAY_PORT} --dashboard-host=0.0.0.0
+    echo '[HEAD] Ray head started'
+
+    # Wait for all workers to join
+    echo '[HEAD] Waiting for Ray workers...'
+    EXPECTED_NODES=$((${#NODES[@]}))
+    for i in \$(seq 1 60); do
+        WORKER_COUNT=\$(ray status 2>/dev/null | grep -c 'node_' || true)
+        if [ \"\${WORKER_COUNT}\" -ge \${EXPECTED_NODES} ]; then
+            echo \"[HEAD] Ray cluster ready with \${WORKER_COUNT} nodes\"
+            break
+        fi
+        if [ \"\$i\" -eq 60 ]; then
+            echo '[HEAD] WARNING: Timed out waiting for Ray workers'
+            ray status 2>/dev/null || true
+        fi
+        sleep 5
+    done
+
+    # --- Start code verifier API ---
+    echo '[HEAD] Starting code verifier API...'
+    uvicorn open_instruct.code_utils.api:app \
+        --host 0.0.0.0 \
+        --port ${CODE_API_PORT} \
+        --workers ${CODE_API_WORKERS} \
+        > ${LOGDIR}/code-api.out 2> ${LOGDIR}/code-api.err &
+    CODE_API_PID=\$!
+
+    # Health check
+    for i in \$(seq 1 30); do
+        if curl -s --connect-timeout 2 http://localhost:${CODE_API_PORT}/health > /dev/null 2>&1; then
+            echo '[HEAD] Code API is healthy'
+            break
+        fi
+        [ \"\$i\" -eq 30 ] && echo '[HEAD] WARNING: Code API health check timed out'
+        sleep 2
+    done
+
+    # --- Launch GRPO training (NO PIPELINE, IFEVAL ONLY) ---
+    echo '[HEAD] Starting GRPO training (no pipeline, IFEval only)...'
+    set -e
+
+    python open_instruct/grpo_fast.py \
+        --exp_name ${RUN_NAME} \
+        --beta 0.0 \
+        --num_samples_per_prompt_rollout 8 \
+        --num_unique_prompts_rollout 64 \
+        --num_mini_batches 1 \
+        --num_epochs 1 \
+        --learning_rate 1e-6 \
+        --per_device_train_batch_size 1 \
+        --output_dir ${OUTPUT_DIR} \
+        --kl_estimator 2 \
+        --dataset_mixer_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf-ifeval-only-hf 1.0 \
+        --dataset_mixer_list_splits train \
+        --dataset_mixer_eval_list /data/artifacts/frank/datasets/Dolci-Think-RL-7B-with-messages-hf-ifeval-only-hf 8 \
+        --dataset_mixer_eval_list_splits train \
+        --max_prompt_token_length 2048 \
+        --response_length 32768 \
+        --pack_length 35840 \
+        --model_name_or_path allenai/Olmo-3-7B-Think-DPO \
+        --chat_template_name olmo_dpo_native \
+        --non_stop_penalty False \
+        --mask_truncated_completions False \
+        --temperature 1.0 \
+        --ground_truths_key ground_truth \
+        --sft_messages_key messages \
+        --total_episodes 10000000 \
+        --deepspeed_stage 3 \
+        --num_learners_per_node 8 \
+        --vllm_num_engines 8 \
+        --vllm_tensor_parallel_size 1 \
+        --lr_scheduler_type constant \
+        --apply_verifiable_reward true \
+        --seed 1 \
+        --local_eval_every 0 \
+        --save_freq 25 \
+        --checkpoint_state_freq 100 \
+        --checkpoint_state_dir ${OUTPUT_DIR}/checkpoint_states \
+        --gradient_checkpointing \
+        --with_tracking \
+        --clip_higher 0.272 \
+        --code_api_url http://${HEAD_IP}:${CODE_API_PORT}/test_program \
+        --code_pass_rate_reward_threshold 0.99 \
+        --backend_timeout 1200 \
+        --llm_judge_model openai/gpt-5-mini \
+        --llm_judge_timeout 600 \
+        --llm_judge_max_tokens 2048 \
+        --llm_judge_max_context_length 32768 \
+        --persona_vector_path /home/fxiao/eval_awareness/eval_steering/vectors/OLMo3-7B-DPO.pt \
+        --persona_baseline_path /home/fxiao/eval_awareness/persona_attribution/runs/baselines_dpo_vector/baselines.pt \
+        --persona_layer_idx 20 \
+        --persona_threshold -0.5 \
+        --inflight_updates false \
+        --async_steps 1 \
+        --save_traces \
+        --rollouts_save_path ${OUTPUT_DIR}/rollouts
+
+    TRAIN_EXIT=\$?
+
+    # Cleanup
+    kill \${CODE_API_PID} 2>/dev/null || true
+    ray stop --force 2>/dev/null || true
+    exit \${TRAIN_EXIT}
+" > "${LOGDIR}/train.out" 2> "${LOGDIR}/train.err"
+
+HEAD_EXIT=$?
+echo "[$(date)] Head node exited with code ${HEAD_EXIT}"
+
+# Cleanup workers
+for PID in "${WORKER_PIDS[@]}"; do
+    kill ${PID} 2>/dev/null || true
+done
+wait 2>/dev/null || true
+
+echo "[$(date)] Done."
+exit ${HEAD_EXIT}

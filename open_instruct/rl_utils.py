@@ -38,6 +38,7 @@ class RolloutRecord:
     advantage: float
     finish_reason: str
     dataset: str
+    dataset_idx: int | None = None
     ground_truth: list[int] | None = None
     request_info: dict | None = None
     logprobs: list[float] | None = None
@@ -115,6 +116,7 @@ def _save_rollouts(
                     advantage=float(advantages[i]),
                     finish_reason=result.finish_reasons[i],
                     dataset=batch.datasets[i],
+                    dataset_idx=batch.indices[i] if batch.indices is not None else None,
                     ground_truth=batch.ground_truths[i],
                     request_info=_get_request_info_for_sample(result.request_info, i),
                     logprobs=result.logprobs[i] if result.logprobs else None,
