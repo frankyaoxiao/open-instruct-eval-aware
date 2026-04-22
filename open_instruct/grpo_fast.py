@@ -106,6 +106,7 @@ from open_instruct.model_utils import (
     print_rich_table,
     push_folder_to_hub,
 )
+from open_instruct.eval_awareness_filter import EvalAwarenessFilter
 from open_instruct.persona_filter import PersonaFilter, PersonaFilterConfig
 from open_instruct.rl_utils import Timer, masked_mean
 from open_instruct.utils import (
@@ -375,6 +376,16 @@ class PolicyTrainerRayProcess(RayProcess):
             self.persona_filter = PersonaFilter(pf_config, self.device, log_dir=args.output_dir)
             self.persona_filter.register_hook(self.ref_policy)
 
+        # LLM-based eval awareness filtering
+        self.eval_awareness_filter: EvalAwarenessFilter | None = None
+        if args.eval_awareness_model is not None:
+            self.eval_awareness_filter = EvalAwarenessFilter(
+                model=args.eval_awareness_model,
+                tokenizer=self.tokenizer,
+                log_dir=args.output_dir,
+                max_workers=args.eval_awareness_max_workers,
+            )
+
         if self.mpu is not None:
             self.splitter = UlyssesSPSplitter(
                 sp_rank=groups._get_sequence_parallel_rank(),
@@ -543,9 +554,9 @@ class PolicyTrainerRayProcess(RayProcess):
             if val is not None:
                 to_device_inplace(val, self.device)
 
-        # Save original int-valued response masks for persona filtering (before bool conversion)
+        # Save original int-valued response masks for rollout-level filters (before bool conversion)
         original_response_masks = None
-        if self.persona_filter is not None:
+        if self.persona_filter is not None or self.eval_awareness_filter is not None:
             original_response_masks = [mask.clone() for mask in data_BT.response_masks]
 
         data_BT.response_masks = [mask.bool() for mask in data_BT.response_masks]
@@ -576,6 +587,14 @@ class PolicyTrainerRayProcess(RayProcess):
                 data_BT, original_response_masks, captured_projections, training_step=training_step
             )
             for k, v in filter_metrics.items():
+                self.local_metrics[k] = v
+
+        # LLM-based eval awareness filtering
+        if self.eval_awareness_filter is not None and original_response_masks is not None:
+            ea_metrics = self.eval_awareness_filter.filter_rollouts(
+                data_BT, original_response_masks, training_step=training_step
+            )
+            for k, v in ea_metrics.items():
                 self.local_metrics[k] = v
 
         # if we have multiple minibatches, we need to calculate the old logprobs for each minibatch

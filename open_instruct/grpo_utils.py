@@ -115,6 +115,11 @@ class ExperimentConfig:
     persona_max_filter_rate: float = 0.5
     """Maximum fraction of rollouts that can be filtered per packed sequence."""
 
+    eval_awareness_model: str | None = None
+    """LLM model for scoring eval awareness (e.g., 'gpt-5-mini'). If set, enables the filter."""
+    eval_awareness_max_workers: int = 60
+    """Max concurrent API calls for eval awareness scoring per rank."""
+
     # Ray
     single_gpu_mode: bool = False
     """whether to collocate vLLM and actor on the same node (mostly for debugging purposes)"""
