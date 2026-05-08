@@ -384,6 +384,7 @@ class PolicyTrainerRayProcess(RayProcess):
                 tokenizer=self.tokenizer,
                 log_dir=args.output_dir,
                 max_workers=args.eval_awareness_max_workers,
+                drop_group=args.eval_awareness_drop_group,
             )
 
         if self.mpu is not None:

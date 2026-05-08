@@ -119,6 +119,8 @@ class ExperimentConfig:
     """LLM model for scoring eval awareness (e.g., 'gpt-5-mini'). If set, enables the filter."""
     eval_awareness_max_workers: int = 60
     """Max concurrent API calls for eval awareness scoring per rank."""
+    eval_awareness_drop_group: bool = False
+    """If True, drop all rollouts in a group when any rollout in that group is flagged as aware."""
 
     # Ray
     single_gpu_mode: bool = False

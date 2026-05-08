@@ -72,11 +72,19 @@ class EvalAwarenessFilter:
     text. Rollouts scored as eval-aware have their response masks zeroed.
     """
 
-    def __init__(self, model: str, tokenizer, log_dir: str | None = None, max_workers: int = 60):
+    def __init__(
+        self,
+        model: str,
+        tokenizer,
+        log_dir: str | None = None,
+        max_workers: int = 60,
+        drop_group: bool = False,
+    ):
         self.client = OpenAI()
         self.model = model
         self.tokenizer = tokenizer
         self.max_workers = max_workers
+        self.drop_group = drop_group
         self._log_dir: Path | None = Path(log_dir) if log_dir is not None else None
 
     def _score_one(self, text: str) -> dict | None:
@@ -169,10 +177,11 @@ class EvalAwarenessFilter:
                     results[idx] = None
         scoring_time = time.perf_counter() - t0
 
-        # Zero masks for aware rollouts and collect log entries
+        # Collect results and log entries first
         total_aware = 0
         num_failed = 0
         all_entries = []
+        aware_ds_indices: set[int] = set()
         for i, (sample_idx, row_idx, rid_int, ds_idx, _text) in enumerate(rollout_info):
             result = results[i]
             if result is None:
@@ -187,6 +196,17 @@ class EvalAwarenessFilter:
 
             if aware:
                 total_aware += 1
+                aware_ds_indices.add(ds_idx)
+
+        # Zero masks — either per-rollout (default) or per-group (if drop_group=True)
+        num_dropped = 0
+        for i, (sample_idx, row_idx, rid_int, ds_idx, _text) in enumerate(rollout_info):
+            result = results[i]
+            if result is None:
+                continue
+            should_drop = result["aware"] or (self.drop_group and ds_idx in aware_ds_indices)
+            if should_drop:
+                num_dropped += 1
                 mask_to_clear = original_response_masks[sample_idx][row_idx] == rid_int
                 data_bt.response_masks[sample_idx][row_idx] &= ~mask_to_clear.to(
                     data_bt.response_masks[sample_idx].device
@@ -195,7 +215,8 @@ class EvalAwarenessFilter:
         total = len(rollout_info)
         logger.info(
             f"[EvalAwareness] step={training_step}: "
-            f"scored={total}, aware={total_aware}, rate={total_aware / max(total, 1):.2%}, "
+            f"scored={total}, aware={total_aware}, dropped={num_dropped}, "
+            f"rate={total_aware / max(total, 1):.2%}, "
             f"skipped={num_skipped}, failed={num_failed}, time={scoring_time:.1f}s"
         )
 
@@ -212,8 +233,10 @@ class EvalAwarenessFilter:
 
         return {
             "eval_awareness/num_aware": float(total_aware),
+            "eval_awareness/num_dropped": float(num_dropped),
             "eval_awareness/total_rollouts": float(total),
             "eval_awareness/filter_rate": total_aware / max(total, 1),
+            "eval_awareness/drop_rate": num_dropped / max(total, 1),
             "eval_awareness/num_skipped": float(num_skipped),
             "eval_awareness/num_failed": float(num_failed),
             "eval_awareness/scoring_time": scoring_time,
