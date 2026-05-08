@@ -33,6 +33,7 @@ class PersonaFilterConfig:
     layer_idx: int = 20
     threshold: float = 2.0
     max_filter_rate: float = 0.5
+    drop_group: bool = False
 
 
 class PersonaFilter:
@@ -72,6 +73,7 @@ class PersonaFilter:
         self.layer_idx = config.layer_idx
         self.threshold = config.threshold
         self.max_filter_rate = config.max_filter_rate
+        self.drop_group = config.drop_group
         self.device = device
 
         self._captured_projections: list[torch.Tensor] | None = None
@@ -224,10 +226,30 @@ class PersonaFilter:
                     rollouts_to_filter.sort(key=lambda x: x[1])
                     rollouts_to_filter = rollouts_to_filter[:max_allowed]
 
-                # Zero out filtered rollouts in the bool response mask
+                # Collect ALL rollout positions in this row (for potential group expansion)
+                row_rollout_positions = []  # (rid_int, ds_idx)
+                for rid_local in rollout_ids.tolist():
+                    rid_local_int = int(rid_local)
+                    rl_positions = row_orig_mask == rid_local_int
+                    if rl_positions.sum() == 0:
+                        continue
+                    rl_ds_idx = int(row_ds_indices[rl_positions][0].item())
+                    row_rollout_positions.append((rid_local_int, rl_ds_idx))
+
+                # Decide which rids to zero in this row
+                if self.drop_group:
+                    flagged_ds = {ds_idx for _, _, ds_idx in rollouts_to_filter}
+                    rids_to_zero = [(rid_int, ds_idx) for rid_int, ds_idx in row_rollout_positions if ds_idx in flagged_ds]
+                else:
+                    rids_to_zero = [(rid_int, ds_idx) for rid_int, _, ds_idx in rollouts_to_filter]
+
+                # Log all flagged (per-rollout) regardless of group expansion
                 for rid_int, diff_val, ds_idx in rollouts_to_filter:
-                    total_filtered += 1
                     filtered_ids.append({"dataset_idx": ds_idx, "diff": round(diff_val, 4)})
+
+                # Zero out the chosen rollouts
+                for rid_int, ds_idx in rids_to_zero:
+                    total_filtered += 1
                     mask_to_clear = orig_mask[row_idx] == rid_int
                     data_bt.response_masks[sample_idx][row_idx] &= ~mask_to_clear.to(
                         data_bt.response_masks[sample_idx].device

@@ -114,6 +114,8 @@ class ExperimentConfig:
     """Filter rollouts whose (projection - baseline) falls below this threshold."""
     persona_max_filter_rate: float = 0.5
     """Maximum fraction of rollouts that can be filtered per packed sequence."""
+    persona_drop_group: bool = False
+    """If True, drop all rollouts in a group when any rollout in that group is flagged."""
 
     eval_awareness_model: str | None = None
     """LLM model for scoring eval awareness (e.g., 'gpt-5-mini'). If set, enables the filter."""

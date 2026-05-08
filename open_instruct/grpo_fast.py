@@ -372,6 +372,7 @@ class PolicyTrainerRayProcess(RayProcess):
                 layer_idx=args.persona_layer_idx,
                 threshold=args.persona_threshold,
                 max_filter_rate=args.persona_max_filter_rate,
+                drop_group=args.persona_drop_group,
             )
             self.persona_filter = PersonaFilter(pf_config, self.device, log_dir=args.output_dir)
             self.persona_filter.register_hook(self.ref_policy)
