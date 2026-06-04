@@ -61,13 +61,21 @@ def is_drop_top5(key: str | None) -> bool:
 
 
 def ensure_messages(row: dict) -> dict:
-    """Make sure `messages` is a list of role/content dicts."""
+    """Make sure `messages` is a list of role/content dicts.
+
+    `Dolci-Think-RL-7B`'s `prompt` field is the post-`rlvr_tokenize_v3`
+    formatting "<role>: <content>" — see dataset_transformation.py's
+    `RAW_PROMPT_KEY = "\\n".join(f"{msg['role']}: {msg['content']}" ...)`.
+    The "user: " is logging output, not message content; strip it before
+    handing to the next round of `apply_chat_template`.
+    """
     msgs = row.get("messages")
     if isinstance(msgs, list) and msgs and isinstance(msgs[0], dict) and "role" in msgs[0]:
         return row
     prompt = row.get("prompt")
     if isinstance(prompt, str):
-        row["messages"] = [{"role": "user", "content": prompt}]
+        content = prompt[len("user: "):] if prompt.startswith("user: ") else prompt
+        row["messages"] = [{"role": "user", "content": content}]
     return row
 
 
