@@ -57,25 +57,12 @@ The experiment expects **two repos checked out side-by-side**:
 `run.sh` auto-detects `OPEN_INSTRUCT_DIR` from its own location and tries
 `../fortress` next to it. Override with `FORTRESS_DIR=...` if it's elsewhere.
 
-### Required file that may be missing after a fresh fortress clone
+### Fortress prompts file
 
-`fortress/.gitignore` excludes `data/`, so a clean clone won't have
-`data/harmbench_strongreject/prompts.jsonl` (the 513-prompt FORTRESS held-out
-probe). `eval.sbatch` will fail at fortress's `paths.prompts` check with
-"file not found".
-
-Fixes (in order of preference):
-- The sender should `git add -f` that single file before pushing. Then a clean
-  clone has it.
-- Or copy the file from another machine where the experiment has run.
-- Or rebuild it from upstream: it's 388 HarmBench + 125 StrongReject prompts.
-  HarmBench is at https://github.com/centerforaisafety/HarmBench, StrongReject
-  at https://github.com/dsbowen/strongreject. Schema is just
-  `{id, prompt, category, source}` per line.
-
-The `run.sh` script does a presence check on the `data/harmbench_strongreject/`
-dir at submit time, so you'll see the error immediately — not after training
-finishes 1.5 days later.
+`data/harmbench_strongreject/prompts.jsonl` (513 HarmBench + StrongReject
+prompts) ships in fortress's git, force-added past the `data/` gitignore.
+A fresh `git clone` of fortress already has it — no action needed.
+`run.sh` sanity-checks for it at submit time.
 
 ## All files in this dir
 
@@ -193,6 +180,26 @@ We keep `--deepspeed_stage 3` because:
 7. **HuggingFace token**: needed to download `allenai/Olmo-3-7B-Think-DPO`. Set
    in `.env` and the train script will source it. `build_dataset.py` reads
    `HF_TOKEN` from env too.
+
+8. **HuggingFace cache location**: default is `~/.cache/huggingface`. The 7B
+   model + Dolci-Think-RL-7B dataset download is ~14 GB. On clusters with small
+   home quotas this fills up — set `HF_HOME=<scratch>/hf_cache` in `.env` and
+   the train script will source it. The reference training scripts use
+   `HF_HOME=/data/artifacts/frank/hf_cache`.
+
+9. **Weights & Biases**: `train.sbatch` passes `--with_tracking`, which calls
+   `wandb.init()` at startup. Three ways this can go:
+   - With `WANDB_API_KEY` in `.env`: logs to wandb normally.
+   - With `WANDB_MODE=disabled` (or `=offline`) in `.env`: silently no-op.
+   - With neither set: `wandb.init()` may prompt for a key on stdin and the
+     SLURM job will hang. **Pick one of the first two before submitting.**
+
+10. **OPENAI cost**: the GRPO LLM-judge reward uses `gpt-5-mini` for non-IFEval
+    rows. Over 1300 steps × 64 prompts × 8 samples ≈ 665K rollouts, only a
+    fraction of which hit the judge (only when the deterministic verifier
+    doesn't apply), but expect several dollars of API spend during training.
+    Fortress eval is another ~270K judge calls (513 prompts × 20 completions
+    × 26 checkpoints) — budget another ~$20-50 there.
 
 8. **fortress `.env`**: must contain `OPENAI_API_KEY`. fortress's `run.py` calls
    `load_dotenv()` from its own cwd, so the `.env` has to live at the fortress

@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 # fortress YAML doesn't accept arbitrary keys, so keep this shape minimal.
-SAMPLING = {"temperature": 1.0, "top_p": 0.95, "max_tokens": 3072, "n": 20}
+SAMPLING = {"temperature": 0.6, "top_p": 0.95, "max_tokens": 3072, "n": 20}
 SCORING = {
     "model": "gpt-5-mini",
     "reasoning_effort": "medium",
